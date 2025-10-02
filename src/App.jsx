@@ -1,333 +1,316 @@
 import React, { useState, useRef, useEffect } from 'react';
-import axios from 'axios';
-import './App.css';
+import { Send, Mic, Square, Loader2, Database } from 'lucide-react';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = '/api';
 
 function App() {
-  const [sessionId] = useState(() => `session_${Date.now()}`);
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
-  const [isRecording, setIsRecording] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [token, setToken] = useState('');
-  
-  const mediaRecorder = useRef(null);
-  const audioChunks = useRef([]);
-  const chatEndRef = useRef(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [audioChunks, setAudioChunks] = useState([]);
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    scrollToBottom();
   }, [messages]);
-
-  const login = async (e) => {
-    e.preventDefault();
-    try {
-      const response = await axios.post(`${API_BASE}/auth/login`, {
-        username,
-        password
-      });
-      setToken(response.data.access_token);
-      setIsAuthenticated(true);
-      localStorage.setItem('token', response.data.access_token);
-    } catch (error) {
-      alert('Login failed: ' + (error.response?.data?.detail || error.message));
-    }
-  };
-
-  const getAuthHeaders = () => {
-    return {
-      'Authorization': `Bearer ${token || localStorage.getItem('token')}`
-    };
-  };
 
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder.current = new MediaRecorder(stream);
-      audioChunks.current = [];
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      const chunks = [];
 
-      mediaRecorder.current.ondataavailable = (event) => {
-        audioChunks.current.push(event.data);
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          chunks.push(e.data);
+        }
       };
 
-      mediaRecorder.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
-        await sendAudioToBackend(audioBlob);
+      recorder.onstop = async () => {
+        const audioBlob = new Blob(chunks, { type: 'audio/webm' });
+        await handleAudioSubmit(audioBlob);
         stream.getTracks().forEach(track => track.stop());
       };
 
-      mediaRecorder.current.start();
+      recorder.start();
+      setMediaRecorder(recorder);
+      setAudioChunks(chunks);
       setIsRecording(true);
     } catch (error) {
       console.error('Error starting recording:', error);
-      alert('Microphone access denied or not available');
+      alert('Error accessing microphone. Please check permissions.');
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorder.current && isRecording) {
-      mediaRecorder.current.stop();
+    if (mediaRecorder && isRecording) {
+      mediaRecorder.stop();
       setIsRecording(false);
-      setIsTranscribing(true);
     }
   };
 
-  const sendAudioToBackend = async (audioBlob) => {
-    const formData = new FormData();
-    formData.append('file', audioBlob, 'recording.webm');
-    formData.append('session_id', sessionId);
-    formData.append('role', 'user');
+  const handleTextSubmit = async (e) => {
+    e.preventDefault();
+    if (!inputText.trim() || isLoading) return;
 
-    try {
-      const response = await axios.post(`${API_BASE}/transcribe`, formData, {
-        headers: { 
-          'Content-Type': 'multipart/form-data',
-          ...getAuthHeaders()
-        },
-      });
-
-      setIsTranscribing(false);
-      
-      const transcriptMessage = {
-        id: Date.now(),
-        role: 'user',
-        type: 'audio_transcript',
-        content: response.data.text,
-        confidence: response.data.confidence,
-        timestamp: new Date(),
-      };
-      
-      setMessages(prev => [...prev, transcriptMessage]);
-      await sendQuery(response.data.text);
-    } catch (error) {
-      console.error('Transcription error:', error);
-      setIsTranscribing(false);
-      alert('Transcription failed: ' + (error.response?.data?.detail || error.message));
-    }
-  };
-
-  const sendQuery = async (text) => {
-    if (!text.trim()) return;
-
-    setIsLoading(true);
-    
-    const userMessage = {
-      id: Date.now(),
-      role: 'user',
-      type: 'text',
-      content: text,
-      timestamp: new Date(),
-    };
-    
+    const userMessage = { role: 'user', content: inputText, type: 'text' };
     setMessages(prev => [...prev, userMessage]);
     setInputText('');
+    setIsLoading(true);
 
     try {
-      const formData = new FormData();
-      formData.append('session_id', sessionId);
-      formData.append('role', 'user');
-      formData.append('text', text);
-
-      const response = await axios.post(`${API_BASE}/query`, formData, {
-        headers: getAuthHeaders()
+      const response = await fetch(`${API_BASE}/query-text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: inputText }),
       });
+
+      const data = await response.json();
       
       const assistantMessage = {
-        id: Date.now() + 1,
         role: 'assistant',
-        type: 'response',
-        content: response.data.summary,
-        results: response.data.result_table,
-        timestamp: new Date(),
+        content: data.message,
+        sqlQuery: data.sql_query,
+        data: data.data,
+        type: 'text'
       };
       
       setMessages(prev => [...prev, assistantMessage]);
     } catch (error) {
-      console.error('Query error:', error);
-      
+      console.error('Error:', error);
       const errorMessage = {
-        id: Date.now() + 1,
         role: 'assistant',
-        type: 'error',
-        content: 'Sorry, I encountered an error processing your query: ' + 
-                (error.response?.data?.detail || error.message),
-        timestamp: new Date(),
+        content: 'Sorry, there was an error processing your request.',
+        type: 'text',
+        isError: true
       };
-      
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    sendQuery(inputText);
+  const handleAudioSubmit = async (audioBlob) => {
+    setIsLoading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
+
+      const response = await fetch(`${API_BASE}/query-audio`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+      
+      const assistantMessage = {
+        role: 'assistant',
+        content: data.message,
+        sqlQuery: data.sql_query,
+        data: data.data,
+        type: 'audio'
+      };
+      
+      setMessages(prev => [...prev, assistantMessage]);
+    } catch (error) {
+      console.error('Error:', error);
+      const errorMessage = {
+        role: 'assistant',
+        content: 'Sorry, there was an error processing your audio.',
+        type: 'audio',
+        isError: true
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const formatResultsTable = (results) => {
-    if (!results || results.length === 0) return null;
+  const formatDataAsTable = (data) => {
+    if (!data || data.length === 0) return null;
 
-    const headers = Object.keys(results[0]);
-    
+    const columns = Object.keys(data[0]);
+
     return (
-      <div className="results-table">
-        <h4>Query Results ({results.length} rows)</h4>
-        <div className="table-container">
-          <table>
-            <thead>
-              <tr>
-                {headers.map(header => (
-                  <th key={header}>{header}</th>
+      <div className="overflow-x-auto mt-2">
+        <table className="min-w-full bg-white border border-gray-200">
+          <thead>
+            <tr className="bg-gray-50">
+              {columns.map(column => (
+                <th key={column} className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase border-b">
+                  {column}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.map((row, index) => (
+              <tr key={index} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                {columns.map(column => (
+                  <td key={column} className="px-4 py-2 text-sm text-gray-900 border-b">
+                    {String(row[column])}
+                  </td>
                 ))}
               </tr>
-            </thead>
-            <tbody>
-              {results.slice(0, 10).map((row, index) => (
-                <tr key={index}>
-                  {headers.map(header => (
-                    <td key={header}>{String(row[header] || '')}</td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {results.length > 10 && (
-            <div className="table-footer">
-              Showing first 10 of {results.length} rows
-            </div>
-          )}
-        </div>
+            ))}
+          </tbody>
+        </table>
       </div>
     );
   };
 
-  if (!isAuthenticated) {
-    return (
-      <div className="login-container">
-        <form onSubmit={login} className="login-form">
-          <h2>Database Chatbot Login</h2>
-          <div>
-            <label>Username:</label>
-            <input 
-              type="text" 
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="admin or user"
-              required
-            />
-          </div>
-          <div>
-            <label>Password:</label>
-            <input 
-              type="password" 
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="admin123 or user123"
-              required
-            />
-          </div>
-          <button type="submit">Login</button>
-          <div className="login-hint">
-            <p>Demo credentials:</p>
-            <p>Admin: admin / admin123</p>
-            <p>User: user / user123</p>
-          </div>
-        </form>
-      </div>
-    );
-  }
-
   return (
-    <div className="app">
-      <header className="app-header">
-        <h1>Database Chatbot</h1>
-        <p>Ask questions about your data using natural language</p>
-        <button onClick={() => {
-          setIsAuthenticated(false);
-          localStorage.removeItem('token');
-        }} className="logout-btn">
-          Logout
-        </button>
+    <div className="flex flex-col h-screen bg-gray-100">
+      {/* Header */}
+      <header className="bg-white shadow-sm border-b border-gray-200">
+        <div className="max-w-4xl mx-auto px-4 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <Database className="h-8 w-8 text-blue-600" />
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900">SQL Chatbot</h1>
+                <p className="text-sm text-gray-600">Ask questions about your database</p>
+              </div>
+            </div>
+            <div className="text-sm text-gray-500">
+              Available tables: users, products, orders, order_items, product_sales
+            </div>
+          </div>
+        </div>
       </header>
 
-      <div className="chat-container">
-        <div className="messages-container">
-          {messages.map((message) => (
-            <div key={message.id} className={`message ${message.role}`}>
-              <div className="message-header">
-                <span className="role">{message.role}</span>
-                <span className="timestamp">
-                  {message.timestamp.toLocaleTimeString()}
-                </span>
-              </div>
-              <div className="message-content">
-                {message.type === 'audio_transcript' && (
-                  <div className="transcript-indicator">
-                    🎤 Transcript ({(message.confidence * 100).toFixed(1)}% confidence)
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-4 py-6">
+        <div className="max-w-4xl mx-auto space-y-6">
+          {messages.length === 0 && (
+            <div className="text-center text-gray-500 mt-20">
+              <Database className="h-16 w-16 mx-auto mb-4 text-gray-300" />
+              <p className="text-lg">Start a conversation with your database</p>
+              <p className="text-sm mt-2">Try asking: "Show me the top 5 products by revenue"</p>
+            </div>
+          )}
+
+          {messages.map((message, index) => (
+            <div
+              key={index}
+              className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+            >
+              <div
+                className={`max-w-3xl rounded-lg px-4 py-3 ${
+                  message.role === 'user'
+                    ? 'bg-blue-600 text-white rounded-br-none'
+                    : message.isError
+                    ? 'bg-red-100 text-red-800 border border-red-200'
+                    : 'bg-white text-gray-800 border border-gray-200 rounded-bl-none'
+                }`}
+              >
+                <div className="flex items-center space-x-2 mb-2">
+                  {message.type === 'audio' && (
+                    <span className="text-xs opacity-75 bg-black bg-opacity-20 px-2 py-1 rounded">
+                      🎤 Voice
+                    </span>
+                  )}
+                </div>
+                
+                <p className="whitespace-pre-wrap">{message.content}</p>
+                
+                {message.sqlQuery && (
+                  <div className="mt-3 pt-3 border-t border-gray-200 border-opacity-30">
+                    <details className="text-sm">
+                      <summary className="cursor-pointer font-medium opacity-75 hover:opacity-100">
+                        View SQL Query
+                      </summary>
+                      <pre className="mt-2 p-3 bg-black bg-opacity-20 rounded text-xs overflow-x-auto">
+                        {message.sqlQuery}
+                      </pre>
+                    </details>
                   </div>
                 )}
-                {message.content}
                 
-                {message.results && formatResultsTable(message.results)}
+                {message.data && formatDataAsTable(message.data)}
               </div>
             </div>
           ))}
-          
-          {isTranscribing && (
-            <div className="message assistant">
-              <div className="message-content transcribing">
-                🎤 Transcribing audio...
-              </div>
-            </div>
-          )}
-          
-          {isLoading && (
-            <div className="message assistant">
-              <div className="message-content loading">
-                ⏳ Processing your query...
-              </div>
-            </div>
-          )}
-          
-          <div ref={chatEndRef} />
-        </div>
 
-        <form onSubmit={handleSubmit} className="input-container">
-          <div className="input-group">
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="Ask a question about your data..."
-              disabled={isLoading || isTranscribing}
-            />
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="bg-white border border-gray-200 rounded-lg rounded-bl-none px-4 py-3 max-w-3xl">
+                <div className="flex items-center space-x-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Processing your query...</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+
+      {/* Input Area */}
+      <div className="bg-white border-t border-gray-200 px-4 py-4">
+        <div className="max-w-4xl mx-auto">
+          <form onSubmit={handleTextSubmit} className="flex space-x-4">
+            <div className="flex-1">
+              <input
+                type="text"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="Ask a question about your data..."
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                disabled={isLoading || isRecording}
+              />
+            </div>
             
             <button
+              type="submit"
+              disabled={!inputText.trim() || isLoading || isRecording}
+              className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center space-x-2"
+            >
+              <Send className="h-4 w-4" />
+              <span>Send</span>
+            </button>
+
+            <button
               type="button"
-              className={`record-button ${isRecording ? 'recording' : ''}`}
-              onMouseDown={startRecording}
-              onMouseUp={stopRecording}
-              onTouchStart={startRecording}
-              onTouchEnd={stopRecording}
-              disabled={isLoading || isTranscribing}
+              onClick={isRecording ? stopRecording : startRecording}
+              disabled={isLoading}
+              className={`px-6 py-3 rounded-lg flex items-center space-x-2 ${
+                isRecording
+                  ? 'bg-red-600 text-white hover:bg-red-700'
+                  : 'bg-gray-600 text-white hover:bg-gray-700'
+              } disabled:bg-gray-400 disabled:cursor-not-allowed`}
             >
-              🎤 {isRecording ? 'Recording...' : 'Hold to Record'}
+              {isRecording ? (
+                <>
+                  <Square className="h-4 w-4" />
+                  <span>Stop</span>
+                </>
+              ) : (
+                <>
+                  <Mic className="h-4 w-4" />
+                  <span>Voice</span>
+                </>
+              )}
             </button>
-            
-            <button 
-              type="submit" 
-              disabled={!inputText.trim() || isLoading || isTranscribing}
-            >
-              Send
-            </button>
-          </div>
-        </form>
+          </form>
+          
+          {isRecording && (
+            <div className="text-center mt-2">
+              <div className="inline-flex items-center space-x-2 text-red-600">
+                <div className="h-2 w-2 bg-red-600 rounded-full animate-pulse"></div>
+                <span className="text-sm">Recording...</span>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
